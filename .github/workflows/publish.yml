@@ -27,6 +27,10 @@ concurrency:
 jobs:
   publish:
     runs-on: windows-latest
+    # The default GITHUB_TOKEN has read-only permissions, which is
+    # enough for checkout but not for creating a GitHub Release.
+    permissions:
+      contents: write
     steps:
       - name: Resolve tag
         id: tag
