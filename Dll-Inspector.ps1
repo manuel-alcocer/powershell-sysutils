@@ -45,6 +45,14 @@
     / enum / alias with their GUIDs, parents, methods, params and members.
     Works cross-bitness (a 32-bit DLL can be inspected from 64-bit PowerShell).
 
+.PARAMETER IncludeDotNetTypes
+    For managed assemblies, additionally load the file via
+    Assembly.ReflectionOnlyLoadFrom and enumerate every type with its
+    attributes (IsComVisible, Guid, ProgId, base type, kind). The
+    cheap fields (RuntimeVersion, PEKind, CorFlags, AssemblyName,
+    Version, Culture, PublicKeyToken) are reported always when the
+    binary has a CLR header.
+
 .PARAMETER IncludeSignature
     Include Authenticode signature info (signer, issuer, validity, status).
     Slower since it goes through CryptoAPI.
@@ -98,6 +106,7 @@ param(
     [switch]$IncludeExports,
     [switch]$IncludeResources,
     [switch]$IncludeTypeLib,
+    [switch]$IncludeDotNetTypes,
     [switch]$IncludeSignature,
     [switch]$IncludeHash,
     [switch]$Detailed
@@ -1133,6 +1142,222 @@ namespace DllInspectorInterop {
     }
 
     # -------------------------------------------------------------------------
+    # .NET assembly info — CLR header + MetaData parsing for the cheap fields,
+    # ReflectionOnlyLoadFrom for ComVisible / type enumeration when requested.
+    # -------------------------------------------------------------------------
+
+    # COMIMAGE_FLAGS
+    $script:CorFlagsMap = [ordered]@{
+        0x00001 = 'ILOnly'
+        0x00002 = 'Required32Bit'
+        0x00004 = 'ILLibrary'
+        0x00008 = 'StrongNameSigned'
+        0x00010 = 'NativeEntryPoint'
+        0x10000 = 'TrackDebugData'
+        0x20000 = 'Preferred32Bit'
+    }
+
+    function Get-DotNetCheapInfo {
+        # Reads the CLR header and the MetaData root from PE bytes — does not
+        # load anything into the AppDomain. Returns null when there is no CLR
+        # data directory.
+        param($Pe, [string]$FilePath)
+        $clr = $Pe.DataDirectories[$script:DD_CLR]
+        if (-not $clr -or $clr.Size -eq 0 -or $clr.Rva -eq 0) { return $null }
+
+        $clrOff = ConvertTo-FileOffset -Rva $clr.Rva -Sections $Pe.Sections
+        if ($null -eq $clrOff) { return $null }
+
+        $br = $Pe.Reader
+        $br.BaseStream.Position = $clrOff
+
+        # IMAGE_COR20_HEADER
+        $cb           = $br.ReadUInt32()
+        $rtMaj        = $br.ReadUInt16()
+        $rtMin        = $br.ReadUInt16()
+        $mdRva        = $br.ReadUInt32()
+        $mdSize       = $br.ReadUInt32()
+        $corFlags     = $br.ReadUInt32()
+        $entryToken   = $br.ReadUInt32()
+
+        # MetaData root — runtime version string lives just after the BSJB header
+        $rtVersion = $null
+        if ($mdRva -ne 0) {
+            $mdOff = ConvertTo-FileOffset -Rva $mdRva -Sections $Pe.Sections
+            if ($null -ne $mdOff) {
+                $br.BaseStream.Position = $mdOff
+                $sig = $br.ReadUInt32()
+                if ($sig -eq 0x424A5342) {   # 'BSJB'
+                    $null   = $br.ReadUInt16()    # iMajorVer
+                    $null   = $br.ReadUInt16()    # iMinorVer
+                    $null   = $br.ReadUInt32()    # iExtraData (reserved)
+                    $verLen = $br.ReadUInt32()    # padded to 4-byte boundary
+                    if ($verLen -gt 0 -and $verLen -lt 1024) {
+                        $verBytes = $br.ReadBytes([int]$verLen)
+                        $end = [Array]::IndexOf($verBytes, [byte]0)
+                        if ($end -ge 0) { $verBytes = $verBytes[0..([Math]::Max($end - 1, 0))] }
+                        if ($verBytes.Length -gt 0) {
+                            $rtVersion = [Text.Encoding]::UTF8.GetString($verBytes)
+                        }
+                    }
+                }
+            }
+        }
+
+        # Decode CorFlags into a string array
+        $flagsDecoded = ConvertTo-Flags -Value $corFlags -Map $script:CorFlagsMap
+
+        # PE kind: combines Machine + PE32/PE32+ + CorFlags
+        $isILOnly    = ($corFlags -band 0x00001) -ne 0
+        $is32Req     = ($corFlags -band 0x00002) -ne 0
+        $is32Pref    = ($corFlags -band 0x20000) -ne 0
+        $machine     = $Pe.Machine
+        $peKind = if (-not $isILOnly) {
+            'ManagedMixed'
+        } elseif ($machine -eq 0x8664) {
+            'x64'
+        } elseif ($machine -eq 0xAA64) {
+            'ARM64'
+        } elseif ($is32Req -and $is32Pref) {
+            'AnyCPUPrefer32'
+        } elseif ($is32Req) {
+            'x86'
+        } else {
+            'AnyCPU'
+        }
+
+        # AssemblyName.GetAssemblyName reads metadata only, doesn't load.
+        $aname = $null
+        try { $aname = [System.Reflection.AssemblyName]::GetAssemblyName($FilePath) } catch { }
+
+        $asmName = $null; $asmVer = $null; $asmCulture = $null; $pkt = $null
+        if ($aname) {
+            $asmName    = $aname.Name
+            $asmVer     = if ($aname.Version) { $aname.Version.ToString() } else { $null }
+            $asmCulture = if ([string]::IsNullOrEmpty($aname.CultureName)) { 'neutral' } else { $aname.CultureName }
+            $pktBytes   = $aname.GetPublicKeyToken()
+            if ($pktBytes -and $pktBytes.Length -gt 0) {
+                $pkt = -join ($pktBytes | ForEach-Object { '{0:x2}' -f $_ })
+            } else {
+                $pkt = ''   # not strong-name signed
+            }
+        }
+
+        [pscustomobject]@{
+            IsManaged         = $true
+            RuntimeVersion    = $rtVersion
+            CorHeaderVersion  = "$rtMaj.$rtMin"
+            CorFlags          = ('0x{0:X}' -f $corFlags)
+            CorFlagsDecoded   = $flagsDecoded
+            PEKind            = $peKind
+            AssemblyName      = $asmName
+            Version           = $asmVer
+            Culture           = $asmCulture
+            PublicKeyToken    = $pkt
+            EntryPointToken   = ('0x{0:X8}' -f $entryToken)
+            HasMetaData       = ($null -ne $rtVersion)
+            IsComVisible      = $null   # filled by deep path
+            Types             = $null   # filled by deep path
+        }
+    }
+
+    function Get-DotNetDeepInfo {
+        # Calls ReflectionOnlyLoadFrom and reads ComVisible at the assembly
+        # level plus a per-type listing with [ComVisible]/[Guid]/[ProgId].
+        # Returns @{ IsComVisible; Types } or $null on failure (mixed-mode
+        # assemblies, missing deps, etc.).
+        param([string]$FilePath, [bool]$IncludeTypes)
+
+        # A scriptblock cast to a delegate handles missing-dep failures.
+        $resolver = [System.ResolveEventHandler]{
+            param($sender, $args)
+            try { [System.Reflection.Assembly]::ReflectionOnlyLoad($args.Name) }
+            catch { $null }
+        }
+
+        $domain = [System.AppDomain]::CurrentDomain
+        $domain.add_ReflectionOnlyAssemblyResolve($resolver)
+        try {
+            $asm = [System.Reflection.Assembly]::ReflectionOnlyLoadFrom($FilePath)
+
+            # Assembly-level ComVisible (default is true for an assembly that
+            # carries no [ComVisible] attribute, but we report null when the
+            # attribute is absent so the caller can distinguish).
+            $asmComVisible = $null
+            foreach ($cad in [System.Reflection.CustomAttributeData]::GetCustomAttributes($asm)) {
+                if ($cad.AttributeType.FullName -eq 'System.Runtime.InteropServices.ComVisibleAttribute') {
+                    if ($cad.ConstructorArguments.Count -gt 0) {
+                        $asmComVisible = [bool]$cad.ConstructorArguments[0].Value
+                    }
+                    break
+                }
+            }
+
+            $typesOut = $null
+            if ($IncludeTypes) {
+                $allTypes = $null
+                try {
+                    $allTypes = $asm.GetTypes()
+                } catch [System.Reflection.ReflectionTypeLoadException] {
+                    $allTypes = $_.Exception.Types | Where-Object { $null -ne $_ }
+                }
+                $list = New-Object System.Collections.Generic.List[object]
+                foreach ($t in $allTypes) {
+                    if (-not $t) { continue }
+                    $tcv = $null; $tguid = $null; $tprog = $null
+                    try {
+                        foreach ($cad in [System.Reflection.CustomAttributeData]::GetCustomAttributes($t)) {
+                            switch ($cad.AttributeType.FullName) {
+                                'System.Runtime.InteropServices.ComVisibleAttribute' {
+                                    if ($cad.ConstructorArguments.Count -gt 0) {
+                                        $tcv = [bool]$cad.ConstructorArguments[0].Value
+                                    }
+                                }
+                                'System.Runtime.InteropServices.GuidAttribute' {
+                                    if ($cad.ConstructorArguments.Count -gt 0) {
+                                        $tguid = [string]$cad.ConstructorArguments[0].Value
+                                    }
+                                }
+                                'System.Runtime.InteropServices.ProgIdAttribute' {
+                                    if ($cad.ConstructorArguments.Count -gt 0) {
+                                        $tprog = [string]$cad.ConstructorArguments[0].Value
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+
+                    [void]$list.Add([pscustomobject]@{
+                        FullName     = $t.FullName
+                        Namespace    = $t.Namespace
+                        BaseType     = if ($t.BaseType) { $t.BaseType.FullName } else { $null }
+                        IsClass      = [bool]$t.IsClass
+                        IsInterface  = [bool]$t.IsInterface
+                        IsEnum       = [bool]$t.IsEnum
+                        IsValueType  = [bool]$t.IsValueType
+                        IsAbstract   = [bool]$t.IsAbstract
+                        IsSealed     = [bool]$t.IsSealed
+                        IsPublic     = [bool]$t.IsPublic
+                        IsComVisible = $tcv
+                        Guid         = $tguid
+                        ProgId       = $tprog
+                    })
+                }
+                $typesOut = $list.ToArray()
+            }
+
+            return @{
+                IsComVisible = $asmComVisible
+                Types        = $typesOut
+            }
+        } catch {
+            return $null
+        } finally {
+            $domain.remove_ReflectionOnlyAssemblyResolve($resolver)
+        }
+    }
+
+    # -------------------------------------------------------------------------
     # Orchestrator — turns one file path into one PSCustomObject.
     # -------------------------------------------------------------------------
 
@@ -1144,6 +1369,7 @@ namespace DllInspectorInterop {
             [switch]$IncludeExports,
             [switch]$IncludeResources,
             [switch]$IncludeTypeLib,
+            [switch]$IncludeDotNetTypes,
             [switch]$IncludeSignature,
             [switch]$IncludeHash
         )
@@ -1233,17 +1459,18 @@ namespace DllInspectorInterop {
                 TypeLib        = $tlibInfo
             }
 
-            # .NET detection (shallow): CLR data directory present and non-empty
-            $clr       = $pe.DataDirectories[$script:DD_CLR]
-            $isManaged = ($clr -and $clr.Size -gt 0 -and $clr.Rva -gt 0)
-            $result.DotNet = [pscustomobject]@{
-                IsManaged      = [bool]$isManaged
-                # Filled by layer 4:
-                RuntimeVersion = $null
-                AssemblyName   = $null
-                Version        = $null
-                IsComVisible   = $null
+            # .NET — cheap path: CLR header + MetaData root + AssemblyName.
+            $dotNet = Get-DotNetCheapInfo -Pe $pe -FilePath $resolved
+            if ($null -eq $dotNet) {
+                $dotNet = [pscustomobject]@{ IsManaged = $false }
+            } elseif ($IncludeDotNetTypes) {
+                $deep = Get-DotNetDeepInfo -FilePath $resolved -IncludeTypes $true
+                if ($deep) {
+                    $dotNet.IsComVisible = $deep.IsComVisible
+                    $dotNet.Types        = $deep.Types
+                }
             }
+            $result.DotNet = $dotNet
 
             if ($IncludeImports) {
                 try   { $result.Imports = @(Get-PEImports -Pe $pe) }
@@ -1280,12 +1507,13 @@ namespace DllInspectorInterop {
 
 process {
     if ($Detailed) {
-        $IncludeImports   = $true
-        $IncludeExports   = $true
-        $IncludeResources = $true
-        $IncludeTypeLib   = $true
-        $IncludeSignature = $true
-        $IncludeHash      = $true
+        $IncludeImports     = $true
+        $IncludeExports     = $true
+        $IncludeResources   = $true
+        $IncludeTypeLib     = $true
+        $IncludeDotNetTypes = $true
+        $IncludeSignature   = $true
+        $IncludeHash        = $true
     }
     foreach ($p in $Path) {
         try {
@@ -1294,6 +1522,7 @@ process {
                 -IncludeExports:$IncludeExports `
                 -IncludeResources:$IncludeResources `
                 -IncludeTypeLib:$IncludeTypeLib `
+                -IncludeDotNetTypes:$IncludeDotNetTypes `
                 -IncludeSignature:$IncludeSignature `
                 -IncludeHash:$IncludeHash
         }
