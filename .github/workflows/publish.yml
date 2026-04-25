@@ -10,8 +10,10 @@ name: Publish to PowerShell Gallery
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'   # prereleases (e.g. v1.0.0-beta.1)
+      # GitHub Actions tag filters use glob, not regex — `+` is literal,
+      # `[0-9]*` means "any string of digits".
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*-*'   # prereleases (e.g. v1.0.0-beta.1)
   workflow_dispatch:                  # manual emergency publish
     inputs:
       tag:
