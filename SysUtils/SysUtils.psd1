@@ -1,11 +1,11 @@
-@{
+﻿@{
     RootModule        = 'SysUtils.psm1'
-    ModuleVersion     = '1.3.0'
+    ModuleVersion     = '1.3.1'
     GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
 
-    Author            = 'Manuel Alcocer J'
-    CompanyName       = 'Manuel Alcocer J'
-    Copyright         = '(c) 2026 Manuel Alcocer J. MIT License.'
+    Author            = 'Manuel Alcocer Jiménez'
+    CompanyName       = 'Manuel Alcocer Jiménez'
+    Copyright         = '(c) 2026 Manuel Alcocer Jiménez <manalcjim@outlook.com>. MIT License.'
 
     Description       = 'Read-only Windows PE / COM / .NET inspector for sysadmins. Parses DLL/OCX/EXE/SYS without LoadLibrary; reports PE headers, version info, COM TypeLibs (CoClasses, interfaces, methods), .NET assembly metadata (PEKind, CorFlags, AssemblyName, types) and Authenticode signatures. Cross-bitness inspection.'
 
@@ -22,6 +22,10 @@
             LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
             ReleaseNotes = @'
+1.3.1 - Metadata-only: update Author, CompanyName and Copyright to the
+full author name (Manuel Alcocer Jiménez) and add contact email in the
+copyright line. No code changes.
+
 1.3.0 - Get-DllGuidTable: add -Both switch.
 
 The new -Both switch shows Type/Name/Guid/RegKey at once (4 columns),
