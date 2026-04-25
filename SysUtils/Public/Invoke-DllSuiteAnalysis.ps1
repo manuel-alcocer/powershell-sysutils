@@ -427,9 +427,19 @@ function Invoke-DllSuiteAnalysis {
 
             $sb.ToString() | Set-Content -Path $summaryPath -Encoding UTF8
 
+            # HTML report (best-effort; failures are reported but don't stop)
+            $htmlPath = Join-Path $OutputDir 'report.html'
+            try {
+                New-DllSuiteReport -Analysis $analysis -OutputPath $htmlPath -ErrorAction Stop
+            } catch {
+                Write-Warning "HTML report generation failed: $($_.Exception.Message)"
+                $htmlPath = $null
+            }
+
             if (-not $Quiet) {
-                Write-Host "  report.json  : $jsonPath"  -ForegroundColor DarkGray
+                Write-Host "  report.json  : $jsonPath"   -ForegroundColor DarkGray
                 Write-Host "  summary.txt  : $summaryPath" -ForegroundColor DarkGray
+                if ($htmlPath) { Write-Host "  report.html  : $htmlPath" -ForegroundColor DarkGray }
             }
         }
 
