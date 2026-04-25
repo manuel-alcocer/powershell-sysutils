@@ -1,15 +1,30 @@
 # powershell-sysutils
 
-A small collection of standalone PowerShell sysadmin tools for Windows. Each
-script is self-contained, ships its own `Get-Help` documentation, and can be
-copied to any host without further setup.
+PowerShell sysadmin tools for Windows. The flagship is the **`SysUtils`**
+module on the [PowerShell Gallery][gallery] (currently exporting
+`Get-DllInfo`). The other three tools — process monitor and two registry
+browsers — still ship as standalone `.ps1` scripts in this repo and will
+move into the module in subsequent releases.
 
-Built and tested against **Windows PowerShell 5.1** on Windows 10 / Server 2016
-and newer. None of the scripts require external modules or NuGet packages.
+[gallery]: https://www.powershellgallery.com/packages/SysUtils
 
-## Scripts
+Built and tested against **Windows PowerShell 5.1** on Windows 10 /
+Server 2016 and newer. No external dependencies.
 
-### `Dll-Inspector.ps1` — Read-only PE/COM/.NET inspector
+## Quick start
+
+```powershell
+# From any Windows machine with PowerShell 5.1+:
+Install-Module SysUtils -Force
+Get-DllInfo C:\Windows\System32\scrrun.dll | ConvertTo-Json -Depth 12
+```
+
+That's it — `PSGallery` is registered by default, no `Register-PSRepository`
+needed.
+
+## Tools
+
+### `Get-DllInfo` (module: `SysUtils`) — Read-only PE/COM/.NET inspector
 
 Inspects DLL, OCX, EXE and SYS files without loading them into the process
 (no `LoadLibrary`, no `DllMain` execution). Works cross-bitness — a 32-bit
@@ -37,24 +52,27 @@ disambiguates **AnyCPU** from real **x86** / **x64** / **AnyCPUPrefer32** /
 
 ```powershell
 # One DLL, full report as JSON
-.\Dll-Inspector.ps1 -Path C:\Windows\System32\scrrun.dll -Detailed |
-    ConvertTo-Json -Depth 12
+Get-DllInfo C:\Windows\System32\scrrun.dll -Detailed | ConvertTo-Json -Depth 12
 
 # Find every COM-registrable DLL under a directory
 Get-ChildItem C:\Legacy -Include *.dll,*.ocx -Recurse |
-    .\Dll-Inspector.ps1 |
+    Get-DllInfo |
     Where-Object { $_.Com.IsComServer } |
     Select-Object Path, @{n='HasTLB';e={$_.Com.HasTypeLib}},
                   @{n='Arch';e={$_.PE.Architecture}}
 
 # Audit which DLLs import a given API
 Get-ChildItem C:\App -Filter *.dll |
-    .\Dll-Inspector.ps1 -IncludeImports |
+    Get-DllInfo -IncludeImports |
     Where-Object { $_.Imports.Functions.Name -contains 'CreateRemoteThread' } |
     Select-Object Path
 ```
 
-### `Process-Monitor.ps1` — Procmon-lite for the console
+`Dll-Inspector.ps1` at the repo root is a thin wrapper that imports the
+module and forwards every parameter to `Get-DllInfo`, so users who
+`git clone` the repo can keep running `.\Dll-Inspector.ps1` unchanged.
+
+### `Process-Monitor.ps1` — Procmon-lite for the console (standalone, not yet in module)
 
 Live activity monitor for a binary (by name or PID). Subscribes to WMI
 process creation/termination events and polls each tracked PID for loaded
@@ -71,7 +89,7 @@ $c = Import-Clixml .\admin.xml
 .\Process-Monitor.ps1 -Target 1234 -ComputerName host.example -Credential $c
 ```
 
-### `Registry-Navigator.ps1` — Interactive registry REPL
+### `Registry-Navigator.ps1` — Interactive registry REPL (standalone)
 
 Lightweight REPL to browse registry keys and values. Local mode talks to
 the local registry directly; remote mode dispatches each command via a
@@ -86,7 +104,7 @@ $cred = Get-Credential administrator
 .\Registry-Navigator.ps1 -ComputerName host.example -Credential $cred
 ```
 
-### `Registry-TUI.ps1` — Full-screen registry browser
+### `Registry-TUI.ps1` — Full-screen registry browser (standalone)
 
 Two-pane TUI (subkeys | values) using the Windows console API.
 Arrow-key navigation, Enter to descend, Backspace to go up. Same remote
@@ -108,20 +126,41 @@ Get-Help .\Process-Monitor.ps1 -Examples
 
 ## Installation
 
-### Option A — `git clone` on each server
+### Option A — PowerShell Gallery (recommended)
 
-The simplest path if `git` is installed on the targets. `git pull` to
-update.
+`Get-DllInfo` lives in the `SysUtils` module. The `PSGallery` repository
+is registered by default on every Windows with PowerShellGet, so a single
+command on each server is enough:
+
+```powershell
+Install-Module SysUtils -Force
+Get-DllInfo C:\Windows\System32\scrrun.dll
+```
+
+For the standalone scripts that haven't moved into the module yet
+(`Process-Monitor.ps1`, `Registry-Navigator.ps1`, `Registry-TUI.ps1`),
+fall back to `git clone` (Option B) or direct download (Option C).
+
+### Option B — `git clone` on each server
+
+The simplest path if `git` is installed on the targets. Includes both the
+module and the standalone scripts. `git pull` to update.
 
 ```powershell
 git clone https://github.com/manuel-alcocer/powershell-sysutils.git C:\Tools\powershell-sysutils
 cd C:\Tools\powershell-sysutils
+
+# Run a standalone script directly:
 .\Dll-Inspector.ps1 -Path .\anything.dll
+
+# Or import the module from the cloned tree (no Install-Module):
+Import-Module .\SysUtils\SysUtils.psd1 -Force
+Get-DllInfo .\anything.dll
 ```
 
-### Option B — Direct download (no git on the target)
+### Option C — Direct download (no git on the target)
 
-Pull a single script from `raw.githubusercontent.com`. Useful for one-off
+Pull individual scripts from `raw.githubusercontent.com`. Useful for one-off
 runs or for bootstrapping.
 
 ```powershell
@@ -131,13 +170,24 @@ foreach ($s in 'Dll-Inspector.ps1','Process-Monitor.ps1','Registry-Navigator.ps1
 }
 ```
 
-### Option C — Ansible
+### Option D — Ansible
 
-Two simple patterns from a control node. Pick whichever your playbook
-already uses.
+Three patterns from a control node. Pick whichever fits your playbook.
 
-`win_get_url` — pulls a single script over HTTP, no git required on the
-target:
+`win_psmodule` — installs the module from PowerShell Gallery. Cleanest:
+
+```yaml
+- hosts: windows
+  tasks:
+    - name: Install SysUtils module
+      community.windows.win_psmodule:
+        name: SysUtils
+        state: present
+        accept_license: yes
+```
+
+`win_get_url` — pulls individual scripts over HTTP, no git required on the
+target. Use this for the standalone scripts not yet in the module:
 
 ```yaml
 - hosts: windows

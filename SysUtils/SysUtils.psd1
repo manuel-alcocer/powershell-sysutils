@@ -1,0 +1,49 @@
+@{
+    RootModule        = 'SysUtils.psm1'
+    ModuleVersion     = '1.0.0'
+    GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
+
+    Author            = 'Manuel Alcocer J'
+    CompanyName       = 'Manuel Alcocer J'
+    Copyright         = '(c) 2026 Manuel Alcocer J. MIT License.'
+
+    Description       = 'Read-only Windows PE / COM / .NET inspector for sysadmins. Parses DLL/OCX/EXE/SYS without LoadLibrary; reports PE headers, version info, COM TypeLibs (CoClasses, interfaces, methods), .NET assembly metadata (PEKind, CorFlags, AssemblyName, types) and Authenticode signatures. Cross-bitness inspection.'
+
+    PowerShellVersion = '5.1'
+
+    FunctionsToExport = @('Get-DllInfo')
+    CmdletsToExport   = @()
+    VariablesToExport = @()
+    AliasesToExport   = @()
+
+    PrivateData = @{
+        PSData = @{
+            Tags         = @('PE','DLL','OCX','COM','TypeLib','dotnet','Inspector','Sysadmin','Windows','PowerShell5')
+            LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
+            ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
+            ReleaseNotes = @'
+1.0.0 - Initial release.
+
+Get-DllInfo: read-only Windows PE inspector that parses DLL/OCX/EXE/SYS
+files without LoadLibrary (so cross-bitness inspection works and DllMain is
+never executed). Layered output controlled by switches:
+
+  - default: PE header (architecture, subsystem, characteristics, sections,
+    timestamp), version info, shallow COM detection, shallow .NET detection.
+  - -IncludeImports: full IDT/ILT walk including import-by-ordinal.
+  - -IncludeExports: full export table with forwarder detection.
+  - -IncludeResources: recursive 3-level resource tree walk.
+  - -IncludeTypeLib: TypeLib reader via oleaut32!LoadTypeLibEx (CoClasses,
+    interfaces, methods, parameters, enums, aliases, IIDs/CLSIDs).
+  - -IncludeDotNetTypes: ReflectionOnlyLoadFrom for [ComVisible]/[Guid]/
+    [ProgId] per type.
+  - -IncludeSignature: Authenticode signature.
+  - -IncludeHash: SHA-256.
+  - -Detailed: turns on every Include* switch.
+
+For managed assemblies, PEKind disambiguates AnyCPU / AnyCPUPrefer32 /
+x86 / x64 / ARM64 / ManagedMixed using Machine + PE32/PE32+ + CorFlags.
+'@
+        }
+    }
+}
