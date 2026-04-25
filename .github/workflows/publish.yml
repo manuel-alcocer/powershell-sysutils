@@ -1,0 +1,94 @@
+name: Publish to PowerShell Gallery
+
+# Publishes the SysUtils module on tag push (v*.*.*). The tag must match
+# the ModuleVersion declared in SysUtils.psd1 — this prevents accidental
+# republishes and forces the manifest to be the source of truth.
+#
+# Required repository secret:
+#   PSGALLERY_API_KEY  (from https://www.powershellgallery.com/users/account/apikeys)
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'   # prereleases (e.g. v1.0.0-beta.1)
+  workflow_dispatch:                  # manual emergency publish
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v1.0.0). Must already exist in the repo.'
+        required: true
+
+concurrency:
+  group: psgallery-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ref="${{ inputs.tag }}"
+          else
+            ref="${{ github.ref_name }}"   # e.g. v1.0.0
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.ref }}
+
+      - name: Verify tag matches manifest version
+        shell: powershell
+        run: |
+          $tag      = '${{ steps.tag.outputs.ref }}'
+          $tagVer   = '${{ steps.tag.outputs.version }}'
+          $manifest = Test-ModuleManifest .\SysUtils\SysUtils.psd1 -ErrorAction Stop
+          $declared = $manifest.Version.ToString()
+          if ($declared -ne $tagVer) {
+            throw "Tag '$tag' (version '$tagVer') does not match manifest ModuleVersion '$declared'. Bump SysUtils.psd1 and retag."
+          }
+          Write-Host "Tag $tag matches manifest version $declared"
+
+      - name: Re-run smoke tests
+        shell: powershell
+        run: |
+          Import-Module .\SysUtils\SysUtils.psd1 -Force -ErrorAction Stop
+          $r = Get-DllInfo C:\Windows\System32\scrrun.dll -IncludeTypeLib
+          if (-not $r.IsValidPE)         { throw 'scrrun: invalid PE' }
+          if (-not $r.Com.IsComServer)   { throw 'scrrun: not COM' }
+          if (-not $r.Com.TypeLib)       { throw 'scrrun: no TypeLib' }
+          Write-Host 'Smoke test OK before publish'
+
+      - name: Publish to PowerShell Gallery
+        shell: powershell
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) {
+            throw "Repository secret PSGALLERY_API_KEY is not set. Add it under Settings -> Secrets and variables -> Actions."
+          }
+          Publish-Module -Path .\SysUtils -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -Verbose
+          $tag = '${{ steps.tag.outputs.ref }}'
+          $ver = '${{ steps.tag.outputs.version }}'
+          Write-Host "Published SysUtils v$ver from tag $tag"
+          Write-Host "  https://www.powershellgallery.com/packages/SysUtils/$ver"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.ref }}
+          name: ${{ steps.tag.outputs.ref }}
+          generate_release_notes: true
+          body: |
+            Published to PowerShell Gallery: https://www.powershellgallery.com/packages/SysUtils/${{ steps.tag.outputs.version }}
+
+            ```powershell
+            Install-Module SysUtils -RequiredVersion ${{ steps.tag.outputs.version }} -Force
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -245,6 +245,40 @@ them with the `Bypass` flag — it does not persist beyond the call:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Dll-Inspector.ps1 -Path foo.dll
 ```
 
+## Publishing (maintainer notes)
+
+Releases are tag-driven via GitHub Actions:
+
+| Workflow | Trigger | What it does |
+| -------- | ------- | ------------ |
+| `.github/workflows/ci.yml` | every push / PR | `Test-ModuleManifest` + import + smoke test of `Get-DllInfo` against `kernel32.dll`, `scrrun.dll` (with `-IncludeTypeLib`) and a managed assembly. Catches regressions before tagging. |
+| `.github/workflows/publish.yml` | push of tag `v*.*.*` (or manual `workflow_dispatch`) | Asserts the tag version matches `ModuleVersion` in `SysUtils.psd1`, re-runs the smoke tests, then `Publish-Module` to PowerShell Gallery and creates a GitHub Release. |
+
+**One-time setup:** create the repository secret `PSGALLERY_API_KEY` under
+_Settings → Secrets and variables → Actions → New repository secret_, with a
+key obtained from
+[powershellgallery.com → My Account → API Keys](https://www.powershellgallery.com/account/apikeys).
+
+**Cutting a release:**
+
+```bash
+# 1. Bump ModuleVersion in SysUtils/SysUtils.psd1
+# 2. Update ReleaseNotes in the same file
+git commit -am 'Release v1.0.1'
+git push
+
+# 3. Tag and push — Actions does the rest
+git tag v1.0.1
+git push --tags
+```
+
+Versions on the Gallery are immutable — once `1.0.0` is published, that
+exact `.nupkg` cannot be replaced. Bump for any fix.
+
+`Build-Module.ps1` at the repo root is kept for local validation only
+(`.\Build-Module.ps1 -WhatIfOnly` is handy before tagging) and as an
+emergency manual publish path. The CI flow is the canonical one.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

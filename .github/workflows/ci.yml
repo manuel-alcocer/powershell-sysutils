@@ -1,0 +1,73 @@
+name: CI
+
+# Validates the SysUtils module on every push and pull request. No secrets,
+# no publish — just manifest checks plus a smoke test of Get-DllInfo against
+# real Windows binaries to catch regressions before tagging a release.
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**']   # tag pushes are handled by publish.yml
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test-ModuleManifest
+        shell: powershell
+        run: |
+          $m = Test-ModuleManifest .\SysUtils\SysUtils.psd1 -ErrorAction Stop
+          Write-Host "Manifest OK: $($m.Name) v$($m.Version) GUID $($m.Guid)"
+          Write-Host "Exports: $($m.ExportedFunctions.Keys -join ', ')"
+
+      - name: Import module
+        shell: powershell
+        run: |
+          Import-Module .\SysUtils\SysUtils.psd1 -Force -ErrorAction Stop
+          $cmd = Get-Command -Module SysUtils
+          if ($cmd.Name -notcontains 'Get-DllInfo') {
+            throw "Get-DllInfo was not exported"
+          }
+          Write-Host "Module imported, Get-DllInfo present"
+
+      - name: Smoke test - native DLL (kernel32)
+        shell: powershell
+        run: |
+          Import-Module .\SysUtils\SysUtils.psd1 -Force
+          $r = Get-DllInfo C:\Windows\System32\kernel32.dll -IncludeImports -IncludeExports
+          if (-not $r.IsValidPE) { throw "kernel32: not a valid PE result" }
+          if ($r.PE.Architecture -ne 'x64') { throw "kernel32: expected x64, got $($r.PE.Architecture)" }
+          if ($r.Com.IsComServer) { throw "kernel32: should not be detected as COM server" }
+          if (-not $r.PE.IsDll) { throw "kernel32: should be flagged as DLL" }
+          if (@($r.Exports).Count -lt 100) { throw "kernel32: expected >=100 exports, got $(@($r.Exports).Count)" }
+          $fwd = @($r.Exports | Where-Object IsForwarder).Count
+          if ($fwd -lt 1) { throw "kernel32: expected at least one forwarder" }
+          Write-Host "kernel32: $(@($r.Exports).Count) exports, $fwd forwarders"
+
+      - name: Smoke test - COM DLL (scrrun)
+        shell: powershell
+        run: |
+          Import-Module .\SysUtils\SysUtils.psd1 -Force
+          $r = Get-DllInfo C:\Windows\System32\scrrun.dll -IncludeTypeLib
+          if (-not $r.Com.IsComServer) { throw "scrrun: should be detected as COM server" }
+          if (-not $r.Com.HasTypeLib) { throw "scrrun: should have TypeLib" }
+          $tl = $r.Com.TypeLib
+          if (-not $tl) { throw "scrrun: TypeLib was not parsed" }
+          if ($tl.Name -ne 'Scripting') { throw "scrrun: TypeLib.Name expected 'Scripting', got '$($tl.Name)'" }
+          if (@($tl.TypeInfos).Count -lt 20) { throw "scrrun: expected >=20 typeinfos, got $(@($tl.TypeInfos).Count)" }
+          Write-Host "scrrun: TypeLib=$($tl.Name) v$($tl.MajorVersion).$($tl.MinorVersion), $(@($tl.TypeInfos).Count) typeinfos"
+
+      - name: Smoke test - .NET assembly
+        shell: powershell
+        run: |
+          Import-Module .\SysUtils\SysUtils.psd1 -Force
+          $path = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Configuration.dll'
+          $r = Get-DllInfo $path
+          if (-not $r.DotNet.IsManaged) { throw "$path : should be managed" }
+          if ($r.DotNet.PEKind -ne 'AnyCPU') { throw "$path : expected PEKind=AnyCPU, got $($r.DotNet.PEKind)" }
+          if (-not $r.DotNet.RuntimeVersion.StartsWith('v4.')) { throw "$path : expected v4.x runtime" }
+          Write-Host ".NET: $($r.DotNet.AssemblyName) v$($r.DotNet.Version) PEKind=$($r.DotNet.PEKind) Runtime=$($r.DotNet.RuntimeVersion)"
