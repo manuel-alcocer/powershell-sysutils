@@ -1,0 +1,16 @@
+# Local Claude Code session state
+.claude/
+
+# Visual Studio / VS Code leftovers
+*.suo
+*.user
+.vs/
+.vscode/
+
+# PowerShell artifacts
+*.ps1.bak
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
