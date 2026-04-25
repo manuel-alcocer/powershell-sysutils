@@ -104,6 +104,20 @@ jobs:
           }
           Write-Host "  https://www.powershellgallery.com/packages/SysUtils/$ver"
 
+      - name: Bundle release zip (module + Tools)
+        if: ${{ hashFiles('Tools/**') != '' }}
+        shell: powershell
+        run: |
+          $ver = '${{ steps.tag.outputs.version }}'
+          $stage = "SysUtils-DllSuite-$ver"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item .\SysUtils -Destination "$stage\SysUtils" -Recurse
+          Copy-Item .\Tools    -Destination "$stage\Tools"    -Recurse
+          if (Test-Path .\LICENSE)   { Copy-Item .\LICENSE   -Destination $stage }
+          if (Test-Path .\README.md) { Copy-Item .\README.md -Destination $stage }
+          Compress-Archive -Path "$stage\*" -DestinationPath "$stage.zip" -Force
+          Write-Host "Bundled $stage.zip"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -116,5 +130,9 @@ jobs:
             ```powershell
             Install-Module SysUtils -RequiredVersion ${{ steps.tag.outputs.version }} -Force
             ```
+
+            For air-gapped CI or sysadmins who prefer a self-contained drop, download the zip below: it bundles the module and the `Tools\` wrappers (GUI + headless CI).
+          files: |
+            SysUtils-DllSuite-${{ steps.tag.outputs.version }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
