@@ -6,13 +6,17 @@ function Get-DllGuidTable {
     .DESCRIPTION
         Reads the TYPELIB resource of a Windows PE binary (DLL/OCX) via
         oleaut32!LoadTypeLibEx (REGKIND_NONE - no registration) and emits one
-        PSCustomObject per TypeLib entry with three fields: Type, Name, Guid.
-        Suitable for Format-Table or quick eyeballing of every CoClass /
-        interface / dispinterface / enum / record / union / alias / module
-        the binary declares.
+        PSCustomObject per TypeLib entry with four fields: Type, Name, Guid,
+        RegKey. Suitable for Format-Table or quick eyeballing of every
+        CoClass / interface / dispinterface / enum / record / union / alias /
+        module the binary declares.
 
-        Strictly read-only: the TypeLib is loaded with REGKIND_NONE so the
-        registry is not touched. LoadLibrary is never called either.
+        RegKey is the registry path under which that GUID is registered, or
+        empty when the entry is not registered (or its kind is not normally
+        registered, e.g. enum/record/union/alias/module). CoClasses are
+        looked up under HKCR\CLSID, interfaces and dispinterfaces under
+        HKCR\Interface; both HKLM and HKCU plus 32-bit (Wow6432Node) views
+        are searched. Lookups are read-only - no LoadLibrary, no regsvr32.
 
     .PARAMETER Path
         One or more paths to PE files. Accepts pipeline input (e.g. from
@@ -77,10 +81,14 @@ function Get-DllGuidTable {
                     $qname = "$libName.$($ti.Name)"
                 }
 
+                $guidStr = $ti.Guid.ToString().ToUpperInvariant()
+                $regKey = Resolve-RegistryKeyForGuid -Guid $guidStr -Kind $type
+
                 [pscustomobject]@{
-                    Type = $type
-                    Name = $qname
-                    Guid = $ti.Guid.ToString().ToUpperInvariant()
+                    Type   = $type
+                    Name   = $qname
+                    Guid   = $guidStr
+                    RegKey = $regKey
                 }
             }
         }
