@@ -74,10 +74,30 @@ jobs:
           if (-not $env:PSGALLERY_API_KEY) {
             throw "Repository secret PSGALLERY_API_KEY is not set. Add it under Settings -> Secrets and variables -> Actions."
           }
-          Publish-Module -Path .\SysUtils -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -Verbose
-          $tag = '${{ steps.tag.outputs.ref }}'
           $ver = '${{ steps.tag.outputs.version }}'
-          Write-Host "Published SysUtils v$ver from tag $tag"
+          $tag = '${{ steps.tag.outputs.ref }}'
+
+          # Publish-Module sometimes reports a false 'already available'
+          # failure when its post-upload verification races with the
+          # Gallery's indexing of the upload it just made. Catch that
+          # specific error and double-check via Find-Module.
+          try {
+              Publish-Module -Path .\SysUtils -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -Verbose
+              Write-Host "Published SysUtils v$ver from tag $tag"
+          } catch {
+              $errId = $_.FullyQualifiedErrorId
+              $isAlreadyAvailable =
+                  ($errId -like 'ModuleVersionIsAlreadyAvailableInTheGallery*') -or
+                  ($_.Exception.Message -match 'is already available in the repository')
+              if (-not $isAlreadyAvailable) { throw }
+
+              Write-Host "::warning::Publish-Module reported 'already available'. Verifying via Find-Module."
+              $found = Find-Module SysUtils -RequiredVersion $ver -Repository PSGallery -ErrorAction SilentlyContinue
+              if (-not $found) {
+                  throw "Publish-Module said v$ver was already on the Gallery, but Find-Module cannot locate it. Failing the release."
+              }
+              Write-Host "Confirmed v$ver is on the Gallery (Author=$($found.Author)). Treating as success."
+          }
           Write-Host "  https://www.powershellgallery.com/packages/SysUtils/$ver"
 
       - name: Create GitHub Release

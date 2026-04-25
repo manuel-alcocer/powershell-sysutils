@@ -22,6 +22,23 @@ Get-DllInfo C:\Windows\System32\scrrun.dll | ConvertTo-Json -Depth 12
 That's it — `PSGallery` is registered by default, no `Register-PSRepository`
 needed.
 
+### First-time bootstrap on Windows Server 2019 / older
+
+Pristine Windows 10 1809 / Server 2019 boxes ship with a stock
+`PowerShellGet 1.0.0.1` that does not pull TLS 1.2 by default and lacks
+the NuGet provider. `Install-Module` fails with
+`NuGet provider is required` until you run this once per box:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
+Set-PSRepository -Name PSGallery -InstallationPolicy Trusted   # optional, skips the per-install confirmation
+```
+
+After that, `Install-Module SysUtils -Force` works as documented above.
+Newer Windows builds (Server 2022, Win10 21H2+, Win11) already have the
+NuGet provider preinstalled.
+
 ## Tools
 
 ### `Get-DllInfo` (module: `SysUtils`) — Read-only PE/COM/.NET inspector
