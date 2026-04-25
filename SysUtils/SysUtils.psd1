@@ -1,6 +1,6 @@
 ﻿@{
     RootModule        = 'SysUtils.psm1'
-    ModuleVersion     = '1.3.1'
+    ModuleVersion     = '1.4.0'
     GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
 
     Author            = 'Manuel Alcocer Jiménez'
@@ -11,7 +11,7 @@
 
     PowerShellVersion = '5.1'
 
-    FunctionsToExport = @('Get-DllInfo','Get-DllGuidTable')
+    FunctionsToExport = @('Get-DllInfo','Get-DllGuidTable','Invoke-DllSuiteAnalysis','New-DllSuiteReport')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
@@ -22,6 +22,32 @@
             LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
             ReleaseNotes = @'
+1.4.0 - DLL Suite Analysis: cross-DLL drift inventory.
+
+Two new public cmdlets aimed at legacy COM suites where DLLs got
+copied across teams and silently diverged while keeping the same
+CLSIDs (the classic VB6 Binary Compatibility footgun):
+
+  - Invoke-DllSuiteAnalysis: scans one or more directories, parses
+    every PE found, and produces a structured analysis with duplicate
+    groups (SHA-256), GUID conflicts (same CLSID/IID across distinct
+    DLLs), interface drift (signature mismatch across versions), and
+    registry status of conflicted CoClasses (which on-disk copy is
+    currently registered, or whether registration points outside the
+    scanned tree). Strictly read-only.
+  - New-DllSuiteReport: renders a self-contained HTML report from the
+    analysis (CSS, JS and JSON embedded). Filterable, no external
+    dependencies, double-clickable - the artifact you mail to dev
+    teams.
+
+Output schema 'dllsuite/1' for stable JSON consumption by dashboards.
+
+Companion wrappers under Tools\ (in the release zip, not on PSGallery):
+DllSuite-GUI.ps1/.cmd (WinForms launcher) and DllSuite-Run.ps1/.cmd
+(headless CI wrapper with proper exit codes: 0/1/2 = ok/fatal/strict-
+fail). Release tags now also publish a SysUtils-DllSuite-<ver>.zip
+asset bundling the module + Tools for air-gapped CI.
+
 1.3.1 - Metadata-only: update Author, CompanyName and Copyright to the
 full author name (Manuel Alcocer Jiménez) and add contact email in the
 copyright line. No code changes.
