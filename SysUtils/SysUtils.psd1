@@ -11,7 +11,7 @@
 
     PowerShellVersion = '5.1'
 
-    FunctionsToExport = @('Get-DllInfo')
+    FunctionsToExport = @('Get-DllInfo','Get-DllGuidTable')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
