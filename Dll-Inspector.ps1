@@ -9,10 +9,10 @@
     PSCustomObject per input path; output serializes cleanly with
     ConvertTo-Json (suitable for Ansible).
 
-    This is layer 1 — header + flags + COM/.NET detection. Imports/Exports,
-    full resource enumeration, TypeLib reading, and .NET type listing are
-    reserved for later layers. The current detection paths read a minimal
-    amount from the export and resource directories to decide flags.
+    Layers 1-2 are implemented: PE header + flags + COM/.NET detection,
+    plus full Imports/Exports/Resources enumeration when requested via the
+    Include* switches. TypeLib parsing (CoClasses/Interfaces) and .NET type
+    listing are reserved for layers 3-4.
 
     The inspector NEVER calls LoadLibrary. The file is opened read-only with
     FileShare.ReadWrite and parsed as raw bytes. Consequences:
@@ -25,12 +25,28 @@
     One or more paths to PE files. Accepts pipeline input (e.g. from
     Get-ChildItem) and the FullName / PSPath property aliases.
 
+.PARAMETER IncludeImports
+    Include the full imports table — modules and per-module function lists
+    (with name+hint or ordinal). Reads the IDT and ILT/IAT from the PE.
+
+.PARAMETER IncludeExports
+    Include the full exports table — name, ordinal, RVA, and forwarder info
+    (when an export points back into the export directory and resolves to
+    "OtherModule.OtherFunction" or "OtherModule.#ordinal").
+
+.PARAMETER IncludeResources
+    Include a flat list of resource entries (Type, Name, Language, Size,
+    CodePage). Walks the full 3-level resource directory tree.
+
 .PARAMETER IncludeSignature
     Include Authenticode signature info (signer, issuer, validity, status).
     Slower since it goes through CryptoAPI.
 
 .PARAMETER IncludeHash
     Include the SHA-256 hash of the file.
+
+.PARAMETER Detailed
+    Convenience switch — turns on every Include* switch.
 
 .EXAMPLE
     .\Dll-Inspector.ps1 -Path C:\Windows\System32\scrrun.dll |
@@ -46,6 +62,19 @@
         .\Dll-Inspector.ps1 |
         Where-Object { $_.Com.IsComServer }
 
+.EXAMPLE
+    # Full inventory (all sections + signature + hash) for one binary
+    .\Dll-Inspector.ps1 -Path .\foo.dll -Detailed | ConvertTo-Json -Depth 12
+
+.EXAMPLE
+    # Audit which DLLs in a directory import a given API
+    Get-ChildItem C:\App -Filter *.dll |
+        .\Dll-Inspector.ps1 -IncludeImports |
+        Where-Object {
+            $_.Imports.Functions.Name -contains 'CreateRemoteThread'
+        } |
+        Select-Object Path
+
 .NOTES
     PowerShell 5.1+ on Windows.
     Layer 1 of the inspector — COM TypeLib reading and .NET type enumeration
@@ -58,8 +87,12 @@ param(
     [Alias('FullName', 'PSPath')]
     [string[]]$Path,
 
+    [switch]$IncludeImports,
+    [switch]$IncludeExports,
+    [switch]$IncludeResources,
     [switch]$IncludeSignature,
-    [switch]$IncludeHash
+    [switch]$IncludeHash,
+    [switch]$Detailed
 )
 
 begin {
@@ -126,6 +159,38 @@ begin {
         0x4000 = 'GuardCF'             # Control Flow Guard
         0x8000 = 'TerminalServerAware'
     }
+
+    # Standard resource type IDs (numeric). TYPELIB is conventionally
+    # string-named (so it does not appear here); a few tools emit it as
+    # numeric 13 — we keep that slot intentionally empty.
+    $script:ResourceTypeMap = @{
+        1  = 'CURSOR'
+        2  = 'BITMAP'
+        3  = 'ICON'
+        4  = 'MENU'
+        5  = 'DIALOG'
+        6  = 'STRING'
+        7  = 'FONTDIR'
+        8  = 'FONT'
+        9  = 'ACCELERATOR'
+        10 = 'RCDATA'
+        11 = 'MESSAGETABLE'
+        12 = 'GROUP_CURSOR'
+        14 = 'GROUP_ICON'
+        16 = 'VERSION'
+        17 = 'DLGINCLUDE'
+        19 = 'PLUGPLAY'
+        20 = 'VXD'
+        21 = 'ANICURSOR'
+        22 = 'ANIICON'
+        23 = 'HTML'
+        24 = 'MANIFEST'
+    }
+
+    # 0x8000_0000_0000_0000 cannot be written as an int64 literal in PS 5.1
+    # (overflows). Build it via BitConverter once.
+    $script:OrdinalFlag64 = [BitConverter]::ToUInt64(
+        [byte[]](0,0,0,0,0,0,0,0x80), 0)
 
     # Data directory indices
     $script:DD_EXPORT   = 0
@@ -299,45 +364,295 @@ begin {
         $sb.ToString()
     }
 
-    function Get-PEExportNamesInternal {
-        # Minimal export-name reader used for COM detection only. Returns the
-        # list of named exports (no ordinals, no forwarders) — full export
-        # parsing is reserved for layer 2.
+    function Get-PEExportsFull {
+        # Reads the full export directory: ordinal, name, RVA, and forwarder
+        # info (when an export's RVA falls within the export directory range,
+        # the value at that location is an ASCII "OtherDll.OtherFunc" string).
+        # Returns @{ Names = string[]; Exports = pscustomobject[] }. The Names
+        # list is also used for the shallow COM-self-reg detector.
         param($Pe)
+        $empty = @{ Names = @(); Exports = @() }
         $dd = $Pe.DataDirectories[$script:DD_EXPORT]
-        if (-not $dd -or $dd.Size -eq 0) { return @() }
+        if (-not $dd -or $dd.Size -eq 0) { return $empty }
 
         $expOff = ConvertTo-FileOffset -Rva $dd.Rva -Sections $Pe.Sections
-        if ($null -eq $expOff) { return @() }
+        if ($null -eq $expOff) { return $empty }
 
         $br = $Pe.Reader
         $br.BaseStream.Position = $expOff
 
-        # IMAGE_EXPORT_DIRECTORY — only NumberOfNames + AddressOfNames are needed
-        $null     = $br.ReadUInt32()    # Characteristics
-        $null     = $br.ReadUInt32()    # TimeDateStamp
-        $null     = $br.ReadUInt16()    # MajorVersion
-        $null     = $br.ReadUInt16()    # MinorVersion
-        $null     = $br.ReadUInt32()    # NameRva
-        $null     = $br.ReadUInt32()    # OrdinalBase
-        $null     = $br.ReadUInt32()    # NumberOfFunctions
-        $numNames = $br.ReadUInt32()
-        $null     = $br.ReadUInt32()    # AddressOfFunctions
-        $rvaNames = $br.ReadUInt32()
-        $null     = $br.ReadUInt32()    # AddressOfNameOrdinals
+        # IMAGE_EXPORT_DIRECTORY (40 bytes)
+        $null         = $br.ReadUInt32()   # Characteristics
+        $null         = $br.ReadUInt32()   # TimeDateStamp
+        $null         = $br.ReadUInt16()   # MajorVersion
+        $null         = $br.ReadUInt16()   # MinorVersion
+        $null         = $br.ReadUInt32()   # NameRva (DLL name)
+        $ordinalBase  = $br.ReadUInt32()
+        $numFuncs     = $br.ReadUInt32()
+        $numNames     = $br.ReadUInt32()
+        $rvaFuncs     = $br.ReadUInt32()
+        $rvaNames     = $br.ReadUInt32()
+        $rvaOrdinals  = $br.ReadUInt32()
 
-        if ($numNames -eq 0 -or $rvaNames -eq 0) { return @() }
-        $namesTableOff = ConvertTo-FileOffset -Rva $rvaNames -Sections $Pe.Sections
-        if ($null -eq $namesTableOff) { return @() }
-
-        $br.BaseStream.Position = $namesTableOff
-        $nameRvas = for ($i = 0; $i -lt $numNames; $i++) { $br.ReadUInt32() }
-
-        $names = foreach ($rva in $nameRvas) {
-            $off = ConvertTo-FileOffset -Rva $rva -Sections $Pe.Sections
-            if ($null -ne $off) { Read-CStringAt -Reader $br -Offset $off }
+        # Address-of-functions table -> RVA per ordinal slot
+        $funcs = @()
+        if ($numFuncs -gt 0 -and $rvaFuncs -ne 0) {
+            $foff = ConvertTo-FileOffset -Rva $rvaFuncs -Sections $Pe.Sections
+            if ($null -ne $foff) {
+                $br.BaseStream.Position = $foff
+                $funcs = for ($i = 0; $i -lt $numFuncs; $i++) { $br.ReadUInt32() }
+            }
         }
-        , @($names)
+
+        # Names + name-ordinals tables (parallel arrays of length NumberOfNames).
+        # NameOrdinals[i] is the index into AddressOfFunctions that Names[i]
+        # refers to.
+        $nameRvasArr = @()
+        $nameOrdsArr = @()
+        if ($numNames -gt 0 -and $rvaNames -ne 0 -and $rvaOrdinals -ne 0) {
+            $nFOff = ConvertTo-FileOffset -Rva $rvaNames    -Sections $Pe.Sections
+            $nOOff = ConvertTo-FileOffset -Rva $rvaOrdinals -Sections $Pe.Sections
+            if ($null -ne $nFOff -and $null -ne $nOOff) {
+                $br.BaseStream.Position = $nFOff
+                $nameRvasArr = for ($i = 0; $i -lt $numNames; $i++) { $br.ReadUInt32() }
+                $br.BaseStream.Position = $nOOff
+                $nameOrdsArr = for ($i = 0; $i -lt $numNames; $i++) { $br.ReadUInt16() }
+            }
+        }
+
+        # Map ordinal slot index -> name
+        $namesByIndex = @{}
+        $namesList    = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $numNames; $i++) {
+            $idx = [int]$nameOrdsArr[$i]
+            $rva = [uint32]$nameRvasArr[$i]
+            $off = ConvertTo-FileOffset -Rva $rva -Sections $Pe.Sections
+            if ($null -ne $off) {
+                $nm = Read-CStringAt -Reader $br -Offset $off
+                $namesByIndex[$idx] = $nm
+                [void]$namesList.Add($nm)
+            }
+        }
+
+        # Build full exports list
+        $exports = New-Object System.Collections.Generic.List[object]
+        $expDirEnd = $dd.Rva + $dd.Size
+        for ($i = 0; $i -lt $numFuncs; $i++) {
+            $rva = [uint32]$funcs[$i]
+            if ($rva -eq 0) { continue }   # gap in the ordinal range
+            $name    = if ($namesByIndex.ContainsKey($i)) { $namesByIndex[$i] } else { $null }
+            $ordinal = [int]($ordinalBase + $i)
+            $isFwd   = ($rva -ge $dd.Rva -and $rva -lt $expDirEnd)
+            $fwd     = $null
+            if ($isFwd) {
+                $fwdOff = ConvertTo-FileOffset -Rva $rva -Sections $Pe.Sections
+                if ($null -ne $fwdOff) { $fwd = Read-CStringAt -Reader $br -Offset $fwdOff }
+            }
+            [void]$exports.Add([pscustomobject]@{
+                Name        = $name
+                Ordinal     = $ordinal
+                Rva         = $rva
+                IsForwarder = $isFwd
+                ForwardsTo  = $fwd
+            })
+        }
+
+        # NOTE: do NOT use @($exports) here — PowerShell 5.1 fails with
+        # "Argument types do not match" when @() coerces a
+        # System.Collections.Generic.List[object] of PSCustomObject items.
+        # Use the .NET ToArray() method directly.
+        @{ Names = $namesList.ToArray(); Exports = $exports.ToArray() }
+    }
+
+    function Get-PEImports {
+        # Reads the IMAGE_IMPORT_DESCRIPTOR array and walks each module's ILT
+        # (preferred) or IAT to enumerate imported functions. Returns
+        # [{ Module, Functions: [{ Name, Ordinal, Hint, ByOrdinal }] }, ...].
+        param($Pe)
+        $dd = $Pe.DataDirectories[$script:DD_IMPORT]
+        if (-not $dd -or $dd.Size -eq 0) { return @() }
+        $impOff = ConvertTo-FileOffset -Rva $dd.Rva -Sections $Pe.Sections
+        if ($null -eq $impOff) { return @() }
+
+        $br      = $Pe.Reader
+        $is64    = $Pe.Is64Bit
+        $thunkSz = if ($is64) { 8 } else { 4 }
+        $modules = New-Object System.Collections.Generic.List[object]
+
+        $cursor = [long]$impOff
+        $maxDescriptors = 4096   # sanity cap for malformed PEs
+        for ($mi = 0; $mi -lt $maxDescriptors; $mi++) {
+            $br.BaseStream.Position = $cursor
+            $oft  = $br.ReadUInt32()      # OriginalFirstThunk (ILT)
+            $null = $br.ReadUInt32()      # TimeDateStamp
+            $null = $br.ReadUInt32()      # ForwarderChain
+            $name = $br.ReadUInt32()      # Module name RVA
+            $ft   = $br.ReadUInt32()      # FirstThunk (IAT)
+            if ($oft -eq 0 -and $name -eq 0 -and $ft -eq 0) { break }
+            $cursor += 20
+
+            $modName = ''
+            $nOff = ConvertTo-FileOffset -Rva $name -Sections $Pe.Sections
+            if ($null -ne $nOff) { $modName = Read-CStringAt -Reader $br -Offset $nOff }
+
+            # Prefer ILT (not patched at runtime); fall back to IAT when bound.
+            $thunkRva = if ($oft -ne 0) { $oft } else { $ft }
+            $functions = New-Object System.Collections.Generic.List[object]
+            $thunkOff = ConvertTo-FileOffset -Rva $thunkRva -Sections $Pe.Sections
+            if ($null -ne $thunkOff) {
+                # First pass: collect raw thunk values until terminator.
+                $thunks = New-Object System.Collections.Generic.List[uint64]
+                $br.BaseStream.Position = $thunkOff
+                while ($thunks.Count -lt 65536) {
+                    $t = if ($is64) { $br.ReadUInt64() } else { [uint64]$br.ReadUInt32() }
+                    if ($t -eq 0) { break }
+                    [void]$thunks.Add($t)
+                }
+                # Second pass: resolve names/ordinals.
+                foreach ($t in $thunks) {
+                    $isOrd = if ($is64) {
+                        (($t -band $script:OrdinalFlag64) -ne 0)
+                    } else {
+                        (($t -band 0x80000000) -ne 0)
+                    }
+                    if ($isOrd) {
+                        [void]$functions.Add([pscustomobject]@{
+                            Name      = $null
+                            Ordinal   = [int]($t -band 0xFFFF)
+                            Hint      = $null
+                            ByOrdinal = $true
+                        })
+                    } else {
+                        $rvaByName = [uint32]($t -band 0xFFFFFFFF)
+                        $byNameOff = ConvertTo-FileOffset -Rva $rvaByName -Sections $Pe.Sections
+                        $hint = $null; $fname = $null
+                        if ($null -ne $byNameOff) {
+                            $br.BaseStream.Position = $byNameOff
+                            $hint  = $br.ReadUInt16()
+                            $fname = Read-CStringAt -Reader $br -Offset ($byNameOff + 2)
+                        }
+                        [void]$functions.Add([pscustomobject]@{
+                            Name      = $fname
+                            Ordinal   = $null
+                            Hint      = $hint
+                            ByOrdinal = $false
+                        })
+                    }
+                }
+            }
+
+            [void]$modules.Add([pscustomobject]@{
+                Module    = $modName
+                Functions = $functions.ToArray()
+            })
+        }
+
+        # Emit the modules as a stream — caller wraps with @() to materialize.
+        $modules.ToArray()
+    }
+
+    function Read-ResourceString {
+        # Reads a UTF-16 length-prefixed name starting at the given absolute
+        # file offset. Used for level entries with the high bit set on NameOrId.
+        param([System.IO.BinaryReader]$Reader, [long]$Offset)
+        $Reader.BaseStream.Position = $Offset
+        $len = $Reader.ReadUInt16()
+        $bytes = $Reader.ReadBytes([int]$len * 2)
+        [Text.Encoding]::Unicode.GetString($bytes)
+    }
+
+    function Read-ResourceDirectory {
+        # Recursively walks one IMAGE_RESOURCE_DIRECTORY and pushes leaf data
+        # entries into $Acc. $Path is a 1..3 hashtable keyed by level (1=Type,
+        # 2=Name, 3=Language); values are int IDs or strings.
+        param(
+            $Pe,
+            [long]$RootOff,
+            [long]$DirOff,
+            [int]$Level,
+            [hashtable]$Path,
+            [System.Collections.IList]$Acc
+        )
+        $br = $Pe.Reader
+        $br.BaseStream.Position = $DirOff
+        $null  = $br.ReadUInt32()   # Characteristics
+        $null  = $br.ReadUInt32()   # TimeDateStamp
+        $null  = $br.ReadUInt16()   # MajorVersion
+        $null  = $br.ReadUInt16()   # MinorVersion
+        $named = $br.ReadUInt16()
+        $idCnt = $br.ReadUInt16()
+        $total = [int]$named + [int]$idCnt
+
+        $entries = for ($i = 0; $i -lt $total; $i++) {
+            [pscustomobject]@{
+                NameOrId     = $br.ReadUInt32()
+                OffsetToData = $br.ReadUInt32()
+            }
+        }
+
+        foreach ($e in $entries) {
+            $key = if (($e.NameOrId -band 0x80000000) -ne 0) {
+                Read-ResourceString -Reader $br `
+                    -Offset ($RootOff + ($e.NameOrId -band 0x7FFFFFFF))
+            } else {
+                [int]$e.NameOrId
+            }
+
+            $newPath = @{} + $Path
+            $newPath[$Level] = $key
+
+            if (($e.OffsetToData -band 0x80000000) -ne 0) {
+                $subOff = $RootOff + ($e.OffsetToData -band 0x7FFFFFFF)
+                Read-ResourceDirectory -Pe $Pe -RootOff $RootOff -DirOff $subOff `
+                    -Level ($Level + 1) -Path $newPath -Acc $Acc
+            } else {
+                # IMAGE_RESOURCE_DATA_ENTRY (16 bytes)
+                $deOff = $RootOff + $e.OffsetToData
+                $br.BaseStream.Position = $deOff
+                $dataRva  = $br.ReadUInt32()
+                $size     = $br.ReadUInt32()
+                $codepage = $br.ReadUInt32()
+                $null     = $br.ReadUInt32()    # Reserved
+                [void]$Acc.Add([pscustomobject]@{
+                    TypeRaw  = $newPath[1]
+                    Name     = $newPath[2]
+                    Language = $newPath[3]
+                    DataRva  = $dataRva
+                    Size     = $size
+                    CodePage = $codepage
+                })
+            }
+        }
+    }
+
+    function Get-PEResources {
+        # Walks the full resource tree and returns a flat list with friendly
+        # type names (decoded from ResourceTypeMap when numeric).
+        param($Pe)
+        $dd = $Pe.DataDirectories[$script:DD_RESOURCE]
+        if (-not $dd -or $dd.Size -eq 0) { return @() }
+        $rootOff = ConvertTo-FileOffset -Rva $dd.Rva -Sections $Pe.Sections
+        if ($null -eq $rootOff) { return @() }
+
+        $list = New-Object System.Collections.Generic.List[object]
+        Read-ResourceDirectory -Pe $Pe -RootOff $rootOff -DirOff $rootOff `
+            -Level 1 -Path @{} -Acc $list
+
+        $list | ForEach-Object {
+            $typeName = if ($_.TypeRaw -is [int]) {
+                $script:ResourceTypeMap[[int]$_.TypeRaw]
+            } else { [string]$_.TypeRaw }
+            if (-not $typeName) { $typeName = "ID:$($_.TypeRaw)" }
+            [pscustomobject]@{
+                Type     = $typeName
+                TypeRaw  = $_.TypeRaw
+                Name     = $_.Name
+                Language = $_.Language
+                Size     = $_.Size
+                CodePage = $_.CodePage
+                DataRva  = $_.DataRva
+            }
+        }
     }
 
     function Test-PEHasTypeLibResource {
@@ -451,6 +766,9 @@ begin {
         [CmdletBinding()]
         param(
             [Parameter(Mandatory)][string]$FilePath,
+            [switch]$IncludeImports,
+            [switch]$IncludeExports,
+            [switch]$IncludeResources,
             [switch]$IncludeSignature,
             [switch]$IncludeHash
         )
@@ -468,6 +786,9 @@ begin {
             Version    = $null
             Com        = $null
             DotNet     = $null
+            Imports    = $null
+            Exports    = $null
+            Resources  = $null
             Signature  = $null
             Sha256     = $null
         }
@@ -508,13 +829,23 @@ begin {
 
             $result.Version = Get-PEVersionInfoSafe -FilePath $resolved
 
-            # COM detection (shallow)
-            $exportNames = @()
-            try { $exportNames = Get-PEExportNamesInternal -Pe $pe } catch { }
+            # Exports — always read (cheap), used both for COM detection and
+            # for the Exports field when -IncludeExports is set.
+            $expData = @{ Names = @(); Exports = @() }
+            try { $expData = Get-PEExportsFull -Pe $pe } catch { }
+            $exportNames = $expData.Names
             $selfReg = @($script:ComSelfRegSymbols | Where-Object { $exportNames -contains $_ })
 
-            $hasTlb = $false
-            try { $hasTlb = Test-PEHasTypeLibResource -Pe $pe } catch { }
+            # Resources — when requested, do a full walk and derive HasTypeLib
+            # from it; otherwise the cheap level-1 detector is enough.
+            $resources = $null
+            $hasTlb    = $false
+            if ($IncludeResources) {
+                try { $resources = @(Get-PEResources -Pe $pe) } catch { $resources = @() }
+                $hasTlb = [bool]($resources | Where-Object { $_.Type -ieq 'TYPELIB' -or $_.TypeRaw -ieq 'TYPELIB' })
+            } else {
+                try { $hasTlb = Test-PEHasTypeLibResource -Pe $pe } catch { }
+            }
 
             $result.Com = [pscustomobject]@{
                 IsComServer    = (($selfReg -contains 'DllGetClassObject') -and ($selfReg -contains 'DllRegisterServer'))
@@ -534,6 +865,17 @@ begin {
                 AssemblyName   = $null
                 Version        = $null
                 IsComVisible   = $null
+            }
+
+            if ($IncludeImports) {
+                try   { $result.Imports = @(Get-PEImports -Pe $pe) }
+                catch { $result.Imports = @() }
+            }
+            if ($IncludeExports) {
+                $result.Exports = @($expData.Exports)
+            }
+            if ($IncludeResources) {
+                $result.Resources = @($resources)
             }
         }
         catch {
@@ -559,9 +901,19 @@ begin {
 }
 
 process {
+    if ($Detailed) {
+        $IncludeImports   = $true
+        $IncludeExports   = $true
+        $IncludeResources = $true
+        $IncludeSignature = $true
+        $IncludeHash      = $true
+    }
     foreach ($p in $Path) {
         try {
             Get-DllInfo -FilePath $p `
+                -IncludeImports:$IncludeImports `
+                -IncludeExports:$IncludeExports `
+                -IncludeResources:$IncludeResources `
                 -IncludeSignature:$IncludeSignature `
                 -IncludeHash:$IncludeHash
         }
