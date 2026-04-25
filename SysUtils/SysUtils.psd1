@@ -1,6 +1,6 @@
 @{
     RootModule        = 'SysUtils.psm1'
-    ModuleVersion     = '1.1.0'
+    ModuleVersion     = '1.2.0'
     GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
 
     Author            = 'Manuel Alcocer J'
@@ -11,7 +11,7 @@
 
     PowerShellVersion = '5.1'
 
-    FunctionsToExport = @('Get-DllInfo')
+    FunctionsToExport = @('Get-DllInfo','Get-DllGuidTable')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
@@ -22,6 +22,19 @@
             LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
             ReleaseNotes = @'
+1.2.0 - Add Get-DllGuidTable cmdlet.
+
+Flat (Type, Name, Guid, RegKey) view of every entry in a DLL's embedded
+TypeLib (coclass / interface / dispatch / enum / record / union / alias
+/ module). The RegKey column reports the registry path under which each
+GUID is registered (HKCR\CLSID for CoClasses, HKCR\Interface for
+interfaces and dispinterfaces; HKLM and HKCU plus 32-bit Wow6432Node
+views are searched), or empty when not registered or not applicable.
+Switch -RegKey swaps the default Format-Table display from Guid to
+RegKey to avoid wrapping; -Kind filters by entry kind. Strictly
+read-only: oleaut32!LoadTypeLibEx is called with REGKIND_NONE and
+registry lookups go through Microsoft.Win32.RegistryKey directly.
+
 1.1.0 - Add -IncludeComRegistration switch.
 
 Cross-references the CoClasses declared in the DLL's embedded TypeLib

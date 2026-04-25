@@ -189,6 +189,54 @@ function Resolve-ClsidEverywhere {
     , $found
 }
 
+# Quick "where is this GUID registered" lookup. Searches the appropriate
+# subtree based on TypeLib kind: CoClasses live under CLSID, interfaces
+# (and dispinterfaces) under Interface; everything else is not registered
+# under a per-GUID node and returns $null. Walks the same 4 hive/view
+# combinations as the rest of this file; on hit, returns a single
+# displayable path string with priority HKLM-x64 > HKLM-x86 > HKCU-x64 >
+# HKCU-x86. The 32-bit views resolve to the Wow6432Node redirected
+# location, which is what we surface so the path is paste-friendly.
+function Resolve-RegistryKeyForGuid {
+    param(
+        [Parameter(Mandatory)][string]$Guid,
+        [Parameter(Mandatory)][string]$Kind
+    )
+
+    if (-not (Test-IsWindowsPlatform)) { return $null }
+
+    $subpath = switch ($Kind) {
+        'coclass'   { 'CLSID' }
+        'interface' { 'Interface' }
+        'dispatch'  { 'Interface' }
+        default     { return $null }
+    }
+
+    $g = $Guid.Trim('{','}').ToUpperInvariant()
+    if ($g -eq '00000000-0000-0000-0000-000000000000') { return $null }
+    $braced = '{' + $g + '}'
+
+    foreach ($root in Get-ComRegistryRoots) {
+        $base = $null; $ck = $null
+        try {
+            $hive = [Microsoft.Win32.RegistryHive]($root.Hive)
+            $view = [Microsoft.Win32.RegistryView]($root.View)
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+            $ck = $base.OpenSubKey("Software\Classes\$subpath\$braced")
+            if (-not $ck) { continue }
+
+            $hivePrefix = if ($root.Hive -eq 'LocalMachine') { 'HKLM' } else { 'HKCU' }
+            $wow = if ($root.View -eq 'Registry32') { 'Wow6432Node\' } else { '' }
+            return "${hivePrefix}:Software\Classes\${wow}${subpath}\${braced}"
+        } catch { }
+        finally {
+            if ($ck)   { $ck.Close() }
+            if ($base) { $base.Close() }
+        }
+    }
+    return $null
+}
+
 function Get-ComRegistrationInfo {
     param(
         [Parameter(Mandatory)][string]$FilePath,
