@@ -33,7 +33,13 @@ function Get-DllGuidTable {
         wrapping in narrow consoles since the RegKey path already contains
         the GUID. The underlying objects always expose all four properties
         regardless of this switch, so ConvertTo-Json / Where-Object / etc.
-        keep seeing the full record.
+        keep seeing the full record. Mutually exclusive with -Both.
+
+    .PARAMETER Both
+        Show both Guid and RegKey columns at once (Type, Name, Guid,
+        RegKey). The combined width is around 130 characters and will
+        wrap on the typical 120-char console. See the wrap-avoidance
+        EXAMPLE below. Mutually exclusive with -RegKey.
 
     .EXAMPLE
         Get-DllGuidTable -Path C:\App\Administrador.dll | Format-Table
@@ -45,11 +51,29 @@ function Get-DllGuidTable {
         Get-ChildItem C:\Legacy -Include *.dll,*.ocx -Recurse |
             Get-DllGuidTable | Sort-Object Type, Name
 
+    .EXAMPLE
+        # Show both Guid and RegKey columns without wrapping on a 120-char
+        # console. Format-Table -Wrap would split each row across multiple
+        # visual lines (ugly); piping through Out-String -Width N produces
+        # a single rendered string per row, so each entry stays on one line
+        # even if it exceeds the console width:
+        Get-DllGuidTable .\foo.dll -Both |
+            Format-Table -AutoSize |
+            Out-String -Width 250 |
+            Write-Host
+
+        # Alternative: enlarge the console buffer once per session and use
+        # Format-Table normally afterwards:
+        $bs = $host.UI.RawUI.BufferSize
+        $bs.Width = 250
+        $host.UI.RawUI.BufferSize = $bs
+        Get-DllGuidTable .\foo.dll -Both | Format-Table -AutoSize
+
     .NOTES
         PowerShell 5.1+ on Windows. Files without a TypeLib resource emit
         no output (use -Verbose to see them being skipped).
     #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Guid')]
     param(
         [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
         [Alias('FullName', 'PSPath', 'FilePath')]
@@ -58,15 +82,23 @@ function Get-DllGuidTable {
         [ValidateSet('coclass','interface','dispatch','enum','record','union','alias','module')]
         [string[]]$Kind,
 
-        [switch]$RegKey
+        [Parameter(ParameterSetName = 'RegKey')]
+        [switch]$RegKey,
+
+        [Parameter(ParameterSetName = 'Both')]
+        [switch]$Both
     )
 
     begin {
         # Pre-build the PSStandardMembers used for default Format-Table
         # display. Output objects always carry all four fields (so JSON /
-        # Where-Object see everything); -RegKey only swaps which 3 columns
-        # are shown by default to avoid wrapping in narrow consoles.
-        $defaultCols = if ($RegKey) { 'Type','Name','RegKey' } else { 'Type','Name','Guid' }
+        # Where-Object see everything); the parameter set only controls
+        # which columns are shown by default to avoid wrapping.
+        $defaultCols = switch ($PSCmdlet.ParameterSetName) {
+            'Both'   { 'Type','Name','Guid','RegKey' }
+            'RegKey' { 'Type','Name','RegKey' }
+            default  { 'Type','Name','Guid' }
+        }
         $displaySet  = New-Object System.Management.Automation.PSPropertySet(
             'DefaultDisplayPropertySet', [string[]]$defaultCols)
         $stdMembers  = [System.Management.Automation.PSMemberInfo[]]@($displaySet)

@@ -1,6 +1,6 @@
 @{
     RootModule        = 'SysUtils.psm1'
-    ModuleVersion     = '1.2.0'
+    ModuleVersion     = '1.3.0'
     GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
 
     Author            = 'Manuel Alcocer J'
@@ -22,6 +22,15 @@
             LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
             ReleaseNotes = @'
+1.3.0 - Get-DllGuidTable: add -Both switch.
+
+The new -Both switch shows Type/Name/Guid/RegKey at once (4 columns),
+complementing the existing default (Type/Name/Guid) and -RegKey
+(Type/Name/RegKey) modes. The three are mutually exclusive via
+ParameterSetName. Help adds an EXAMPLE showing how to avoid line
+wrapping in narrow consoles when using -Both (Out-String -Width 250
+and BufferSize tweak).
+
 1.2.0 - Add Get-DllGuidTable cmdlet.
 
 Flat (Type, Name, Guid, RegKey) view of every entry in a DLL's embedded
