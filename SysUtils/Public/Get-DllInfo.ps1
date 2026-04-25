@@ -41,6 +41,22 @@ function Get-DllInfo {
         dispinterface / enum / alias with their GUIDs, parents, methods, params
         and members.
 
+    .PARAMETER IncludeComRegistration
+        Cross-reference the DLL's CoClasses against HKCR\CLSID to determine
+        whether the COM server is correctly registered. Walks HKLM and HKCU
+        in both 64-bit and 32-bit registry views via Microsoft.Win32.RegistryKey
+        (no PowerShell registry provider — much faster). Reports every CLSID
+        whose InprocServer32 points at the inspected DLL plus, for each
+        CoClass declared in the TypeLib, whether it is Registered, DeclaredOnly
+        (declared but never registered) or PathMismatch (registered but
+        InprocServer32 points to a different file). CLSIDs registered to this
+        DLL but absent from the TypeLib are reported as RegisteredOnly (common
+        and not necessarily a problem — TypeLibs do not always expose every
+        creatable class). Strictly read-only — no
+        regsvr32, no LoadLibrary. Implies TypeLib parsing internally even if
+        -IncludeTypeLib is not specified, but only emits the TypeLib payload
+        when -IncludeTypeLib is set.
+
     .PARAMETER IncludeDotNetTypes
         For managed assemblies, additionally load the file via
         Assembly.ReflectionOnlyLoadFrom and enumerate every type with its
@@ -82,6 +98,12 @@ function Get-DllInfo {
             Select-Object Path
 
     .EXAMPLE
+        # Verify a COM DLL is correctly registered and list every CLSID it owns
+        $info = Get-DllInfo -Path C:\App\foo.dll -IncludeComRegistration
+        $info.Com.Registration.Status                      # OK / Partial / Unregistered
+        $info.Com.Registration.Clsids | Format-Table Clsid, ProgId, Status, View
+
+    .EXAMPLE
         # Full inventory (all sections + signature + hash) for one binary
         Get-DllInfo -Path .\foo.dll -Detailed | ConvertTo-Json -Depth 12
 
@@ -98,6 +120,7 @@ function Get-DllInfo {
         [switch]$IncludeExports,
         [switch]$IncludeResources,
         [switch]$IncludeTypeLib,
+        [switch]$IncludeComRegistration,
         [switch]$IncludeDotNetTypes,
         [switch]$IncludeSignature,
         [switch]$IncludeHash,
@@ -106,13 +129,14 @@ function Get-DllInfo {
 
     process {
         if ($Detailed) {
-            $IncludeImports     = $true
-            $IncludeExports     = $true
-            $IncludeResources   = $true
-            $IncludeTypeLib     = $true
-            $IncludeDotNetTypes = $true
-            $IncludeSignature   = $true
-            $IncludeHash        = $true
+            $IncludeImports         = $true
+            $IncludeExports         = $true
+            $IncludeResources       = $true
+            $IncludeTypeLib         = $true
+            $IncludeComRegistration = $true
+            $IncludeDotNetTypes     = $true
+            $IncludeSignature       = $true
+            $IncludeHash            = $true
         }
 
         foreach ($p in $Path) {
@@ -195,15 +219,33 @@ function Get-DllInfo {
                     try { $hasTlb = Test-PEHasTypeLibResource -Pe $pe } catch { }
                 }
 
+                # TypeLib is needed both for the public TypeLib payload AND
+                # internally for COM registration cross-referencing. Load it
+                # once if either path needs it.
                 $tlibInfo = $null
-                if ($IncludeTypeLib -and $hasTlb) {
+                if ($hasTlb -and ($IncludeTypeLib -or $IncludeComRegistration)) {
                     $tlibInfo = Get-TypeLibInfoSafe -FilePath $resolved
                 }
+
+                $registration = $null
+                if ($IncludeComRegistration) {
+                    try {
+                        $registration = Get-ComRegistrationInfo -FilePath $resolved -TypeLibInfo $tlibInfo
+                    } catch {
+                        $registration = [pscustomobject]@{
+                            Scanned = $false
+                            Status  = 'Error'
+                            Issues  = @($_.Exception.Message)
+                        }
+                    }
+                }
+
                 $result.Com = [pscustomobject]@{
                     IsComServer    = (($selfReg -contains 'DllGetClassObject') -and ($selfReg -contains 'DllRegisterServer'))
                     HasTypeLib     = $hasTlb
                     SelfRegExports = @($selfReg)
-                    TypeLib        = $tlibInfo
+                    TypeLib        = if ($IncludeTypeLib) { $tlibInfo } else { $null }
+                    Registration   = $registration
                 }
 
                 # .NET — cheap path: CLR header + MetaData root + AssemblyName.

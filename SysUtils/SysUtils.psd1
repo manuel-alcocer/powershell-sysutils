@@ -1,6 +1,6 @@
 @{
     RootModule        = 'SysUtils.psm1'
-    ModuleVersion     = '1.0.0'
+    ModuleVersion     = '1.1.0'
     GUID              = '4515655c-dd64-4d6f-a700-e2c9fa04f50a'
 
     Author            = 'Manuel Alcocer J'
@@ -22,6 +22,18 @@
             LicenseUri   = 'https://github.com/manuel-alcocer/powershell-sysutils/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/manuel-alcocer/powershell-sysutils'
             ReleaseNotes = @'
+1.1.0 - Add -IncludeComRegistration switch.
+
+Cross-references the CoClasses declared in the DLL's embedded TypeLib
+against HKCR\CLSID across HKLM/HKCU x64+x86 views to determine whether
+a COM in-proc server is correctly registered, plus surfaces every CLSID
+whose InprocServer32 points at the inspected DLL. Uses
+Microsoft.Win32.RegistryKey directly (full HKCR\CLSID walk drops from
+~20s to ~1s vs the PowerShell registry provider). Strictly read-only:
+no regsvr32, no LoadLibrary, no admin needed. Per-CLSID statuses:
+Registered / DeclaredOnly / PathMismatch / RegisteredOnly. Global
+verdict: OK / Partial / Unregistered / NotApplicable.
+
 1.0.0 - Initial release.
 
 Get-DllInfo: read-only Windows PE inspector that parses DLL/OCX/EXE/SYS
