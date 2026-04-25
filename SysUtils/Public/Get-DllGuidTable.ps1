@@ -27,6 +27,14 @@ function Get-DllGuidTable {
         record, union, alias, module. When omitted, every TypeLib entry is
         emitted.
 
+    .PARAMETER RegKey
+        Default Format-Table view shows the columns Type, Name, Guid. With
+        -RegKey it shows Type, Name, RegKey instead - useful to avoid line
+        wrapping in narrow consoles since the RegKey path already contains
+        the GUID. The underlying objects always expose all four properties
+        regardless of this switch, so ConvertTo-Json / Where-Object / etc.
+        keep seeing the full record.
+
     .EXAMPLE
         Get-DllGuidTable -Path C:\App\Administrador.dll | Format-Table
 
@@ -48,8 +56,21 @@ function Get-DllGuidTable {
         [string[]]$Path,
 
         [ValidateSet('coclass','interface','dispatch','enum','record','union','alias','module')]
-        [string[]]$Kind
+        [string[]]$Kind,
+
+        [switch]$RegKey
     )
+
+    begin {
+        # Pre-build the PSStandardMembers used for default Format-Table
+        # display. Output objects always carry all four fields (so JSON /
+        # Where-Object see everything); -RegKey only swaps which 3 columns
+        # are shown by default to avoid wrapping in narrow consoles.
+        $defaultCols = if ($RegKey) { 'Type','Name','RegKey' } else { 'Type','Name','Guid' }
+        $displaySet  = New-Object System.Management.Automation.PSPropertySet(
+            'DefaultDisplayPropertySet', [string[]]$defaultCols)
+        $stdMembers  = [System.Management.Automation.PSMemberInfo[]]@($displaySet)
+    }
 
     process {
         foreach ($p in $Path) {
@@ -82,14 +103,17 @@ function Get-DllGuidTable {
                 }
 
                 $guidStr = $ti.Guid.ToString().ToUpperInvariant()
-                $regKey = Resolve-RegistryKeyForGuid -Guid $guidStr -Kind $type
+                $regKeyVal = Resolve-RegistryKeyForGuid -Guid $guidStr -Kind $type
 
-                [pscustomobject]@{
+                $obj = [pscustomobject]@{
                     Type   = $type
                     Name   = $qname
                     Guid   = $guidStr
-                    RegKey = $regKey
+                    RegKey = $regKeyVal
                 }
+                $obj | Add-Member -MemberType MemberSet -Name PSStandardMembers `
+                                  -Value $stdMembers -Force
+                $obj
             }
         }
     }
